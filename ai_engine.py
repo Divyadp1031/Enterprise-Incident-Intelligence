@@ -1,8 +1,9 @@
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from transformers import pipeline
 
 
 # ============================================================
@@ -72,20 +73,32 @@ CATEGORY_TEAMS = [
 
 
 # ============================================================
-# LOCAL AI MODEL
+# LOCAL AI MODELS
 # ============================================================
 
-# This model runs locally and does not require an API key.
-# It creates semantic embeddings for incident descriptions.
+# These models run locally and do not require an API key.
+# One model creates semantic embeddings for incident descriptions.
+# The other creates concise summaries for support operators.
 
 MODEL_NAME = "all-MiniLM-L6-v2"
-
 MODEL = SentenceTransformer(MODEL_NAME)
 
 CATEGORY_EMBEDDINGS = MODEL.encode(
     CATEGORY_TEXTS,
     normalize_embeddings=True
 )
+
+SUMMARY_MODEL_NAME = "google/flan-t5-small"
+
+try:
+    SUMMARY_GENERATOR = pipeline(
+        "text2text-generation",
+        model=SUMMARY_MODEL_NAME,
+        tokenizer=SUMMARY_MODEL_NAME,
+        device=-1,
+    )
+except Exception:
+    SUMMARY_GENERATOR = None
 
 
 # ============================================================
@@ -345,15 +358,14 @@ def estimate_priority(
 
 
 # ============================================================
-# EXTRACTIVE INCIDENT SUMMARY
+# SUMMARY GENERATION
 # ============================================================
 
 def summarize_incident(description: str) -> str:
     """
     Generate a concise extractive summary.
 
-    This intentionally uses deterministic NLP rather than
-    pretending to be a generative LLM.
+    This deliberately avoids depending on an external API.
     """
 
     text = description.strip()
@@ -361,7 +373,6 @@ def summarize_incident(description: str) -> str:
     if not text:
         return "No description provided."
 
-    # Split into sentences.
     sentences = re.split(
         r"(?<=[.!?])\s+",
         text
@@ -376,10 +387,7 @@ def summarize_incident(description: str) -> str:
     if not sentences:
         return text
 
-    # Prefer the first meaningful sentence.
     summary = sentences[0]
-
-    # Remove long explanatory clauses.
     lower_summary = summary.lower()
 
     separators = [
@@ -391,28 +399,94 @@ def summarize_incident(description: str) -> str:
     ]
 
     for separator in separators:
-
         if separator in lower_summary:
-
             parts = re.split(
                 re.escape(separator),
                 summary,
                 flags=re.IGNORECASE
             )
-
             if parts and len(parts[0].strip()) >= 30:
                 summary = parts[0].strip()
                 break
 
-    # Limit summary length.
     words = summary.split()
-
     if len(words) > 25:
         summary = " ".join(words[:25]) + "..."
 
     summary = summary.rstrip(".!?")
-
     return summary + "."
+
+
+def _looks_like_repetition(text: str) -> bool:
+    """Detect obvious repeated-word output from a weak local generator."""
+
+    cleaned = re.sub(r"[^a-zA-Z0-9\s]", " ", text).lower().strip()
+    if not cleaned:
+        return True
+
+    words = cleaned.split()
+    if len(words) <= 8:
+        return False
+
+    unique_ratio = len(set(words)) / len(words)
+    repeated_phrase = any(
+        words[i] == words[i + 1] for i in range(len(words) - 1)
+    )
+
+    return unique_ratio < 0.5 or repeated_phrase
+
+
+def generate_summary(title: str, description: str) -> str:
+    """
+    Use a local Hugging Face model to generate an incident summary.
+
+    If the generated text is repetitive or poor quality,
+    fall back to a deterministic extractive summary.
+    """
+
+    text = (description or "").strip()
+    if not text:
+        return "No description provided."
+
+    fallback_summary = summarize_incident(description)
+
+    if SUMMARY_GENERATOR is None:
+        return fallback_summary
+
+    prompt = (
+        "Write a concise 1-sentence incident summary for an IT support team. "
+        f"Title: {title}. Description: {description}"
+    )
+
+    try:
+        result = SUMMARY_GENERATOR(
+            prompt,
+            max_length=60,
+            min_length=15,
+            num_beams=4,
+            do_sample=False,
+            truncation=True,
+        )
+
+        generated = result[0].get("generated_text", "").strip()
+        if not generated:
+            return fallback_summary
+
+        generated = re.sub(r"\s+", " ", generated).strip()
+
+        if generated.lower().startswith("summary:"):
+            generated = generated.split(":", 1)[1].strip()
+
+        if len(generated) < 20:
+            return fallback_summary
+
+        if _looks_like_repetition(generated):
+            return fallback_summary
+
+        return generated.rstrip(".!?") + "."
+
+    except Exception:
+        return fallback_summary
 
 
 # ============================================================
@@ -451,11 +525,12 @@ def analyze_incident(
     )
 
     # --------------------------------------------------------
-    # STEP 3: SUMMARY
+    # STEP 3: LOCAL GENERATIVE SUMMARY
     # --------------------------------------------------------
 
-    summary = summarize_incident(
-        description
+    summary = generate_summary(
+        title,
+        description,
     )
 
     # --------------------------------------------------------

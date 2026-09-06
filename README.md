@@ -69,12 +69,13 @@ python main.py
 
 ## Packages and why they are used
 
-- `fastapi` — makes the backend web app.
-- `uvicorn` — runs the web server.
-- `sentence-transformers` — helps the AI understand incident text.
-- `transformers` — supports AI text tools.
-- `torch` — runs the AI code.
-- `
+- `fastapi` — builds the backend API and web app.
+- `uvicorn` — runs the FastAPI server.
+- `sentence-transformers` — creates embeddings for incident text and semantic matching.
+- `transformers` — provides the Hugging Face model and local text-generation pipeline.
+- `torch` — runs the ML model locally on the computer.
+- `scikit-learn` — computes cosine similarity for category matching.
+- `numpy` and `scipy` — support numerical and scientific ML operations.
 
 ## Notes
 
